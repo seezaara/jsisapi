@@ -503,6 +503,10 @@ const ok = valid(
 
 Utility validation and conversion functions used by custom filters.
 
-## License
 
-MIT
+# licence
+ <p>
+    <img width="32px" src="https://raw.githubusercontent.com/seezaara/RocketV2ray/main/doc/logo.png"><a href="https://www.youtube.com/@seezaara">seezaara youtube</a>
+<br>
+    <img width="32px" src="https://raw.githubusercontent.com/seezaara/RocketV2ray/main/doc/logo.png"><a href="https://t.me/seezaara">seezaara telegram</a>
+</p> 
