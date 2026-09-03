@@ -1,0 +1,32 @@
+{
+  "name": "jsisapi",
+  "version": "1.0.1",
+  "description": "The JsisApi is a nodejs api structure simple and high performance",
+  "main": "index.js",
+  "bin": {
+    "JSISAPI": "index.js"
+  },
+  "keywords": [
+    "jsis",
+    "nodejs",
+    "api",
+    "jsisapi",
+    "ws",
+    "websocket",
+    "post",
+    "request"
+  ],
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "seezaara",
+  "license": "MIT",
+  "homepage": "https://github.com/seezaara/jsisapi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seezaara/jsisapi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/seezaara/jsisapi/issues"
+  }
+}
