@@ -1,204 +1,307 @@
+"use strict";
 
-const fs = require('fs');
-const { Transform } = require('stream');
+const fs = require("fs");
+const { Transform, pipeline } = require("stream");
 const session = require("./session");
 
-const UPLOAD_TIMEOUT = 30 * 1000;
-const bad_request = 'HTTP/1.1 400 Bad Request\r\n\r\n';
-function donot() { }
+const UPLOAD_TIMEOUT = 30000;
+const BAD_REQUEST = "HTTP/1.1 400 Bad Request\r\n\r\n";
 
-// ------------------------------------
-// Upload function
-// ------------------------------------
+const noop = () => { };
 
 
-async function upload(req, res, UPLOAD_TEMP, filter, filter_chunk) {
+// --------------------------------------------------
+// UPLOAD
+// --------------------------------------------------
 
-    // ------------------------------ session + field
-    const token = req.headers.token
+async function upload(req, res, temp, filter, filterChunk) {
+
+    const token = req.headers.token;
+    const field = req.headers.field;
+
     const data = session.get_session(token);
-    const field = req.headers.field && req.headers.field.length < 64
-        ? req.headers.field
-        : undefined;
 
-    if (!data || !token || !field)
-        return req.socket.end(bad_request);
+    if (!data || !field || field.length >= 64)
+        return req.socket.end(BAD_REQUEST);
 
-    if (filter ? !(await filter(field, data, res, req)) : false) {
+    if (filter && !(await filter(field, data, res, req))) {
         session.delete_session(token);
-        return req.socket.end(bad_request);
+        return req.socket.end(BAD_REQUEST);
     }
 
-    // ------------------------------ file validation
     const file = data.files[field];
 
     if (!file || !file.size || file.status)
-        return req.socket.end(bad_request);
+        return req.socket.end(BAD_REQUEST);
 
-    file.status = 1;   // file started upload
+    file.status = 1;
 
-    // ------------------------------ path
-    const file_path = UPLOAD_TEMP + "/" + data.time + "_" + session.create_cookie_id(36) + "_" + field;
-    file.temp = file_path;
+    const filename =
+        temp + "/" +
+        data.time + "_" +
+        session.create_cookie_id(36) +
+        "_" + field;
 
-    const wstream = fs.createWriteStream(file_path);
-    let totalWritten = 0;
-    let aborted = false;
+    file.temp = filename;
 
-    function bad(e) {
+    const output = fs.createWriteStream(filename);
+    let written = 0;
+    let failed = false;
 
-        if (aborted) return;
-        aborted = true;
-        req.socket.end(bad_request);
+    const fail = () => {
 
-        req.unpipe();
+        if (failed)
+            return;
+
+        failed = true;
+
         req.destroy();
+        output.destroy();
 
-        wstream.destroy();
-        fs.unlink(file_path, donot);
+        fs.unlink(filename, noop);
+        req.socket.end(BAD_REQUEST);
+    };
 
-    }
 
-    // ------------------------------ transform
-    const transform = new Transform({
-        async transform(chunk, enc, cb) {
-            if (totalWritten === 0 && file.sign) {
-                if (!file.sign.some(sign =>
-                    sign === chunk.subarray(0, sign.length / 2).toString("hex")
-                ))
-                    return cb(null);
-            }
+    // ------------------------------------------------
+    // Fast path
+    // ------------------------------------------------
 
-            if (totalWritten > file.size || (filter_chunk ? !(await filter_chunk(field, data, totalWritten, chunk)) : false))
-                return cb(null);
+    if (!file.sign && !filterChunk) {
 
-            totalWritten += chunk.length;
+        req.pipe(output);
 
-            cb(null, chunk);
-        }
-    });
+        req.once("error", fail);
+        output.once("error", fail);
 
-    // ------------------------------ pipe
-    req.pipe(transform).pipe(wstream);
+        output.once("finish", async () => {
 
-    // ------------------------------ timeout
-    req.socket.setTimeout(UPLOAD_TIMEOUT);
+            if (output.bytesWritten !== file.size)
+                return fail();
 
-    // ------------------------------ errors
-    req.once("error", bad);
-    transform.once("error", bad);
-    wstream.once("error", bad);
-    // ------------------------------ finish
-    wstream.once("finish", async () => {
-
-        if (totalWritten !== file.size)
-            return bad();
-
-        file.status = 2;
-
-        var out = '{"ok":true}';
-
-        // ------------------------------ move them after finish
-        if (data.files && Object.values(data.files).every(f => f.status === 2)) {
-            delete data.files
-            session.delete_session(token);
-
-            const rawdata = (await data.__(data.data, res, req))
-            try {
-                out = JSON.stringify(rawdata || {});
-            } catch (e) {
-                return bad(e);
-            }
-        }
-
-        res.writeHead(200, {
-            "Content-Length": Buffer.byteLength(out),
-            "Content-Type": "application/json"
+            await upload_finished(
+                file,
+                data,
+                token,
+                res,
+                req
+            );
         });
-
-        res.end(out);
-    });
-}
-
-// ------------------------------------
-// download function
-// ------------------------------------
-
-async function download(req, res, fd) {
-    try {
-        // ------------------------------ file validation
-        const stat = await fd.stat(); 
-
-        if (!stat.isFile())
-            return bad_request_call();
-
-        // ------------------------------ headers
-        const size = stat.size;
-        const range = req.headers['range'];
-
-        let headers = {
-            'Accept-Ranges': 'bytes',
-            'Content-Disposition': 'attachment;',
-            'Content-Type': 'application/octet-stream',
-            'X-Content-Type-Options': 'nosniff',
-            'Cache-Control': 'no-cache'
-        };
-
-        let streamOptions;
-        let statusCode = 200;
-
-        if (range && range.startsWith('bytes=')) {
-            const [startStr, endStr] = range.replace('bytes=', '').split('-');
-            const starts = parseInt(startStr, 10) || 0;
-            const ends = endStr ? Math.min(parseInt(endStr, 10), size - 1) : size - 1;
-
-            if (starts >= size ||
-                ends < starts ||
-                starts < 0 ||
-                ends > size - 1) {
-
-                return bad_request_call();
-            }
-
-            headers['Content-Range'] = `bytes ${starts}-${ends}/${size}`;
-            headers['Content-Length'] = ends - starts + 1;
-            streamOptions = { start: starts, end: ends };
-            statusCode = 206;
-        } else {
-            headers['Content-Length'] = size;
-        }
-
-        const readStream = fd.createReadStream(streamOptions);
-
-        // ------------------------------ badrequest
-        
-        function bad_request_call() {
-            req.socket.end(bad_request);
-            fd.close().catch(donot);
-            if (readStream)
-                readStream.destroy();
-        }
-
-        // ------------------------------ timeout
 
         req.socket.setTimeout(UPLOAD_TIMEOUT);
 
-        // ------------------------------ errors
+        return;
+    }
 
-        req.on('error', bad_request_call);
-        readStream.on('error', bad_request_call);
 
-        // ------------------------------ pipe
+    // ------------------------------------------------
+    // Validation path
+    // ------------------------------------------------
 
-        res.writeHead(statusCode, headers);
-        readStream.pipe(res);
+    const validate = new Transform({
+
+        transform(chunk, encoding, done) {
+
+            if (!written && file.sign) {
+
+                const hex = chunk
+                    .subarray(0, file.sign[0].length / 2)
+                    .toString("hex");
+
+                let valid = false;
+
+                for (let i = 0; i < file.sign.length; i++) {
+                    if (file.sign[i] === hex) {
+                        valid = true;
+                        break;
+                    }
+                }
+
+                if (!valid)
+                    return done();
+            }
+
+            if (
+                written + chunk.length > file.size ||
+                (filterChunk &&
+                    !filterChunk(field, data, written, chunk))
+            )
+                return done();
+
+            written += chunk.length;
+            done(null, chunk);
+        }
+    });
+
+    req.once("error", fail);
+    output.once("error", fail);
+    validate.once("error", fail);
+
+    req.socket.setTimeout(UPLOAD_TIMEOUT);
+
+    pipeline(req, validate, output, err => {
+        if (err)
+            return fail();
+    });
+
+    output.once("finish", async () => {
+
+        if (written !== file.size)
+            return fail();
+
+        await upload_finished(
+            file,
+            data,
+            token,
+            res,
+            req
+        );
+    });
+}
+
+
+// --------------------------------------------------
+// UPLOAD FINISH
+// --------------------------------------------------
+
+async function upload_finished(file, data, token, res, req) {
+
+    file.status = 2;
+
+    let output = '{"ok":true}';
+
+    if (
+        data.files &&
+        Object.values(data.files).every(file => file.status === 2)
+    ) {
+
+        delete data.files;
+        session.delete_session(token);
+
+        try {
+            const result = await data.__(data.data, res, req);
+            output = JSON.stringify(result || {});
+        } catch (err) {
+            console.error("Upload callback error:", err);
+            return req.socket.end(BAD_REQUEST);
+        }
+    }
+
+    res.writeHead(200, {
+        "Content-Length": Buffer.byteLength(output),
+        "Content-Type": "application/json"
+    });
+
+    res.end(output);
+}
+
+
+// --------------------------------------------------
+// DOWNLOAD
+// --------------------------------------------------
+
+async function download(req, res, file, h) {
+
+    try {
+
+        const stat = await file.stat();
+
+        if (!stat.isFile()) {
+            await file.close();
+            return req.socket.end(BAD_REQUEST);
+        }
+
+        const size = stat.size;
+        const range = req.headers.range;
+
+        let start = 0;
+        let end = size - 1;
+        let status = 200;
+
+        if (range && range.startsWith("bytes=")) {
+
+            const value = range.slice(6);
+            const dash = value.indexOf("-");
+
+            if (dash === -1) {
+                await file.close();
+                return req.socket.end(BAD_REQUEST);
+            }
+
+            const startText = value.slice(0, dash);
+            const endText = value.slice(dash + 1);
+
+            start = startText ? Number(startText) : 0;
+            end = endText ? Number(endText) : size - 1;
+
+            if (
+                !Number.isInteger(start) ||
+                !Number.isInteger(end) ||
+                start < 0 ||
+                start >= size ||
+                end < start
+            ) {
+                await file.close();
+                return req.socket.end(BAD_REQUEST);
+            }
+
+            if (end >= size)
+                end = size - 1;
+
+            status = 206;
+        }
+
+        const length = end - start + 1;
+
+        const headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": length,
+            "Content-Type": "application/octet-stream",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-cache"
+        };
+
+        if (status === 206)
+            headers["Content-Range"] =
+                `bytes ${start}-${end}/${size}`;
+
+        res.writeHead(status, h ? { ...headers, ...h } : headers);
+
+        const stream = file.createReadStream({
+            start,
+            end
+        });
+
+        req.socket.setTimeout(UPLOAD_TIMEOUT);
+
+        stream.once("error", () => {
+            file.close().catch(noop);
+
+            if (!res.writableEnded)
+                res.destroy();
+        });
+
+        stream.once("close", () => {
+            file.close().catch(noop);
+        });
+
+        stream.pipe(res);
+
     } catch (err) {
-        console.log("download error", err);
-        req.socket.end(bad_request);
+
+        console.error("Download error:", err);
+
+        file.close().catch(noop);
+
+        if (!res.headersSent)
+            req.socket.end(BAD_REQUEST);
+        else
+            res.destroy();
     }
 }
+
 
 module.exports = {
     upload,
     download
-}
+};

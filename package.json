@@ -1,7 +1,7 @@
 {
   "name": "jsisapi",
-  "version": "1.0.1",
-  "description": "The JsisApi is a nodejs api structure simple and high performance",
+  "version": "2.0.0",
+  "description": "The JsisApi is a nodejs api and host structure simple and high performance",
   "main": "index.js",
   "bin": {
     "JSISAPI": "index.js"

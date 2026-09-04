@@ -2,10 +2,12 @@
 
 const fs = require("fs")
 const url = require('url');
+const host = require("./host")
 const type = require("./type")
 const utils = require("./utils")
 const server = require("./server")
 const session = require("./session")
+
 //-------------- filters: 
 // websocket_open
 // websocket_message
@@ -19,6 +21,7 @@ const session = require("./session")
 // temp
 // limit
 // ------------------------------------
+
 function api(config, list) {
     const API_NAME = config.name.substring(0, config.name.lastIndexOf("_") + 1)
     const VERSION = +config.name.substring(API_NAME.length)
@@ -278,6 +281,10 @@ async function upload_start(api, safe_data, ws, req, filter) {
 }
 
 module.exports = {
+    post: host.post,
+    req: host.req,
+    get: host.get,
+    use: host.use,
     api,
     utils,
     valid: type.valid
